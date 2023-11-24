@@ -157,4 +157,4 @@ async def read_root(text: str, target_lang: str, from_lang: str = Query('auto', 
     return {"original_text": text, "translated_text": translated_text, "target_language": target_lang, "source_language": from_lang}
 
 # To run The FastAPI app
-# uvicorn main:app --reload
+# uvicorn main:app --host 0.0.0.0 --port 8000 --reload
