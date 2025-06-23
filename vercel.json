@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/main.py"
+    }
+  ],
+  "env": {
+    "ENVIRONMENT": "production",
+    "REDIS_ENABLED": "false"
+  },
+  "functions": {
+    "main.py": {
+      "runtime": "@vercel/python@4.7.2",
+      "maxDuration": 30
+    }
+  }
+}
