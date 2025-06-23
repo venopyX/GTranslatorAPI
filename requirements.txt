@@ -33,3 +33,4 @@ structlog==23.2.0
 click
 h11
 multidict
+attr
