@@ -10,16 +10,28 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Set work directory
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies and build essentials
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
+        gcc \
+        g++ \
+        make \
+        libc6-dev \
+        libffi-dev \
+        libssl-dev \
         curl \
+        pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
+# Upgrade pip and install wheel
+RUN pip install --upgrade pip setuptools wheel
+
+# Copy requirements first for better caching
 COPY requirements.txt .
-RUN pip install --no-deps -r requirements.txt
+
+# Install Python dependencies with verbose output
+RUN pip install --no-cache-dir --verbose -r requirements.txt
 
 # Copy application code
 COPY main.py .
@@ -27,6 +39,8 @@ COPY main.py .
 # Create non-root user
 RUN adduser --disabled-password --gecos '' appuser \
     && chown -R appuser:appuser /app
+
+# Switch to non-root user
 USER appuser
 
 # Health check
@@ -37,4 +51,4 @@ HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
 EXPOSE $PORT
 
 # Run the application
-CMD uvicorn main:app --host 0.0.0.0 --port $PORT
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1"]
