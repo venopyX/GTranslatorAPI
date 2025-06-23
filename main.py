@@ -19,7 +19,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, BaseSettings, Field, validator
+from pydantic import BaseModel, Field, validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -163,37 +163,34 @@ class UnsupportedLanguageError(Exception):
 
 
 # Configuration Settings
-class Settings(BaseSettings):
+class Settings:
     """Application settings."""
     
-    # Server settings
-    host: str = "0.0.0.0"
-    port: int = int(os.getenv("PORT", "8000"))
-    debug: bool = os.getenv("DEBUG", "false").lower() == "true"
-    
-    # CORS settings
-    allowed_origins: List[str] = ["*"]
-    
-    # Redis cache settings
-    redis_enabled: bool = os.getenv("REDIS_ENABLED", "false").lower() == "true"
-    redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-    
-    # Rate limiting
-    rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "100"))
-    batch_rate_limit_per_minute: int = int(os.getenv("BATCH_RATE_LIMIT_PER_MINUTE", "50"))
-    
-    # Translation settings
-    max_text_length: int = int(os.getenv("MAX_TEXT_LENGTH", "5000"))
-    max_batch_size: int = int(os.getenv("MAX_BATCH_SIZE", "10"))
-    translation_timeout: int = int(os.getenv("TRANSLATION_TIMEOUT", "30"))
-    
-    # Logging
-    log_level: str = os.getenv("LOG_LEVEL", "INFO")
-    
-    class Config:
-        """Pydantic config."""
-        env_file = ".env"
-        case_sensitive = False
+    def __init__(self):
+        # Server settings
+        self.host = os.getenv("HOST", "0.0.0.0")
+        self.port = int(os.getenv("PORT", "8000"))
+        self.debug = os.getenv("DEBUG", "false").lower() == "true"
+        
+        # CORS settings
+        origins_env = os.getenv("ALLOWED_ORIGINS", "*")
+        self.allowed_origins = origins_env.split(",") if origins_env != "*" else ["*"]
+        
+        # Redis cache settings
+        self.redis_enabled = os.getenv("REDIS_ENABLED", "false").lower() == "true"
+        self.redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        
+        # Rate limiting
+        self.rate_limit_per_minute = int(os.getenv("RATE_LIMIT_PER_MINUTE", "100"))
+        self.batch_rate_limit_per_minute = int(os.getenv("BATCH_RATE_LIMIT_PER_MINUTE", "50"))
+        
+        # Translation settings
+        self.max_text_length = int(os.getenv("MAX_TEXT_LENGTH", "5000"))
+        self.max_batch_size = int(os.getenv("MAX_BATCH_SIZE", "10"))
+        self.translation_timeout = int(os.getenv("TRANSLATION_TIMEOUT", "30"))
+        
+        # Logging
+        self.log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
 
 # Pydantic Models
@@ -375,8 +372,11 @@ class CacheManager:
     async def close(self):
         """Close cache connections."""
         if self.redis:
-            await self.redis.close()
-            logger.info("Redis connection closed")
+            try:
+                await self.redis.close()
+                logger.info("Redis connection closed")
+            except Exception as e:
+                logger.error(f"Error closing Redis connection: {e}")
     
     async def get(self, key: str) -> Optional[Dict[str, Any]]:
         """Get cached value."""
@@ -426,32 +426,41 @@ class GoogleTranslator:
     
     async def initialize(self):
         """Initialize the HTTP session with optimized settings."""
-        connector = aiohttp.TCPConnector(
-            limit=100,
-            limit_per_host=30,
-            ttl_dns_cache=300,
-            use_dns_cache=True,
-            keepalive_timeout=60,
-            enable_cleanup_closed=True
-        )
-        
-        timeout = aiohttp.ClientTimeout(total=30, connect=10)
-        
-        self.session = aiohttp.ClientSession(
-            connector=connector,
-            timeout=timeout,
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; GTranslatorAPI/2.0)"
-            }
-        )
-        
-        logger.info("Google Translator initialized")
+        try:
+            connector = aiohttp.TCPConnector(
+                limit=100,
+                limit_per_host=30,
+                ttl_dns_cache=300,
+                use_dns_cache=True,
+                keepalive_timeout=60,
+                enable_cleanup_closed=True,
+                ssl=False  # Disable SSL verification for better compatibility
+            )
+            
+            timeout = aiohttp.ClientTimeout(total=30, connect=10)
+            
+            self.session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=timeout,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; GTranslatorAPI/2.0)"
+                }
+            )
+            
+            logger.info("Google Translator initialized")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize Google Translator: {e}")
+            raise
     
     async def close(self):
         """Close the HTTP session."""
         if self.session:
-            await self.session.close()
-            logger.info("Google Translator closed")
+            try:
+                await self.session.close()
+                logger.info("Google Translator closed")
+            except Exception as e:
+                logger.error(f"Error closing Google Translator: {e}")
     
     async def translate(
         self,
@@ -485,8 +494,17 @@ class GoogleTranslator:
                         await asyncio.sleep(wait_time)
                         continue
                     else:
-                        raise TranslationError(f"HTTP {response.status}: {await response.text()}")
+                        error_text = await response.text()
+                        raise TranslationError(f"HTTP {response.status}: {error_text}")
                         
+            except asyncio.TimeoutError:
+                if attempt == self.max_retries - 1:
+                    raise TranslationError("Request timeout")
+                
+                wait_time = self.retry_delay * (2 ** attempt)
+                logger.warning(f"Timeout error, retrying in {wait_time}s")
+                await asyncio.sleep(wait_time)
+                
             except aiohttp.ClientError as e:
                 if attempt == self.max_retries - 1:
                     raise TranslationError(f"Network error: {str(e)}")
@@ -561,16 +579,25 @@ translator = GoogleTranslator()
 async def lifespan(app: FastAPI):
     """Handle application startup and shutdown events."""
     # Startup
-    logger.info("Starting GTranslatorAPI...")
-    await cache_manager.initialize()
-    await translator.initialize()
+    logger.info("Starting GTranslatorAPI v2.0...")
+    try:
+        await cache_manager.initialize()
+        await translator.initialize()
+        logger.info("All services initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize services: {e}")
+        raise
     
     yield
     
     # Shutdown
     logger.info("Shutting down GTranslatorAPI...")
-    await cache_manager.close()
-    await translator.close()
+    try:
+        await cache_manager.close()
+        await translator.close()
+        logger.info("All services closed successfully")
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
 
 
 # Initialize FastAPI app
@@ -589,7 +616,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -604,7 +631,11 @@ async def translation_error_handler(request: Request, exc: TranslationError):
     """Handle translation errors."""
     return JSONResponse(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        content={"error": "Translation service unavailable", "detail": str(exc)}
+        content={
+            "error": "Translation service unavailable", 
+            "detail": str(exc),
+            "timestamp": time.time()
+        }
     )
 
 
@@ -613,7 +644,24 @@ async def unsupported_language_error_handler(request: Request, exc: UnsupportedL
     """Handle unsupported language errors."""
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
-        content={"error": "Unsupported language", "detail": str(exc)}
+        content={
+            "error": "Unsupported language", 
+            "detail": str(exc),
+            "timestamp": time.time()
+        }
+    )
+
+
+@app.exception_handler(ValueError)
+async def value_error_handler(request: Request, exc: ValueError):
+    """Handle validation errors."""
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "error": "Validation error",
+            "detail": str(exc),
+            "timestamp": time.time()
+        }
     )
 
 
@@ -622,10 +670,16 @@ async def unsupported_language_error_handler(request: Request, exc: UnsupportedL
 async def root():
     """Root endpoint for health check."""
     return {
-        "message": "GTranslatorAPI is running",
+        "message": "🚀 GTranslatorAPI v2.0 is running!",
         "version": "2.0.0",
         "status": "healthy",
-        "docs": "/docs"
+        "docs": "/docs",
+        "endpoints": {
+            "translate": "/translate",
+            "batch": "/translate/batch",
+            "languages": "/languages",
+            "health": "/health"
+        }
     }
 
 
@@ -633,18 +687,27 @@ async def root():
 async def health_check():
     """Detailed health check endpoint."""
     try:
+        # Test translation service
         test_result = await translator.translate("hello", "es", "en")
         service_status = "healthy" if test_result else "degraded"
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         service_status = "unhealthy"
     
+    cache_status = await cache_manager.health_check()
+    
     return {
         "status": service_status,
         "timestamp": time.time(),
-        "cache_status": await cache_manager.health_check(),
+        "cache_status": cache_status,
         "supported_languages": len(LANGUAGE_CODES),
-        "port": settings.port
+        "port": settings.port,
+        "version": "2.0.0",
+        "services": {
+            "translator": service_status,
+            "cache": cache_status,
+            "rate_limiter": "active"
+        }
     }
 
 
@@ -653,7 +716,21 @@ async def get_supported_languages():
     """Get list of all supported languages."""
     return {
         "languages": LANGUAGE_CODES,
-        "count": len(LANGUAGE_CODES)
+        "count": len(LANGUAGE_CODES),
+        "popular": {
+            "English": "en",
+            "Spanish": "es", 
+            "French": "fr",
+            "German": "de",
+            "Italian": "it",
+            "Portuguese": "pt",
+            "Russian": "ru",
+            "Japanese": "ja",
+            "Korean": "ko",
+            "Chinese (Simplified)": "zh-CN",
+            "Arabic": "ar",
+            "Hindi": "hi"
+        }
     }
 
 
@@ -666,13 +743,20 @@ async def translate_get(
     from_lang: str = Query("auto", alias="from_lang", description="Source language code"),
 ):
     """Translate text using GET method."""
-    translation_request = TranslationRequest(
-        text=text,
-        target_lang=target_lang,
-        from_lang=from_lang
-    )
-    
-    return await _perform_translation(translation_request)
+    try:
+        translation_request = TranslationRequest(
+            text=text,
+            target_lang=target_lang,
+            from_lang=from_lang
+        )
+        
+        return await _perform_translation(translation_request)
+        
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Validation error: {str(e)}"
+        )
 
 
 @app.post("/translate", summary="Translate Text (POST)")
@@ -686,21 +770,39 @@ async def translate_post(request: Request, translation_request: TranslationReque
 @limiter.limit(f"{settings.batch_rate_limit_per_minute}/minute")
 async def translate_batch(request: Request, batch_request: BatchTranslationRequest):
     """Translate multiple texts in a single request."""
+    start_time = time.time()
     translations = []
     
-    for text in batch_request.texts:
-        translation_request = TranslationRequest(
-            text=text,
-            target_lang=batch_request.target_lang,
-            from_lang=batch_request.from_lang
-        )
-        result = await _perform_translation(translation_request)
-        translations.append(result)
+    for i, text in enumerate(batch_request.texts):
+        try:
+            translation_request = TranslationRequest(
+                text=text,
+                target_lang=batch_request.target_lang,
+                from_lang=batch_request.from_lang
+            )
+            result = await _perform_translation(translation_request)
+            translations.append({
+                "index": i,
+                "success": True,
+                "translation": result
+            })
+        except Exception as e:
+            logger.error(f"Batch translation failed for item {i}: {e}")
+            translations.append({
+                "index": i,
+                "success": False,
+                "error": str(e)
+            })
+    
+    processing_time = time.time() - start_time
     
     return {
-        "translations": translations, 
+        "translations": translations,
         "count": len(translations),
-        "batch_id": f"batch_{int(time.time())}"
+        "successful": len([t for t in translations if t["success"]]),
+        "failed": len([t for t in translations if not t["success"]]),
+        "batch_id": f"batch_{int(time.time())}",
+        "processing_time": round(processing_time, 3)
     }
 
 
@@ -715,6 +817,8 @@ async def _perform_translation(translation_request: TranslationRequest) -> Trans
         logger.info("Cache hit for translation request")
         return TranslationResponse(**cached_result)
     
+    start_time = time.time()
+    
     try:
         # Perform translation
         translated_text = await translator.translate(
@@ -728,6 +832,8 @@ async def _perform_translation(translation_request: TranslationRequest) -> Trans
         if translation_request.from_lang == "auto":
             detected_lang = await translator.detect_language(translation_request.text)
         
+        processing_time = time.time() - start_time
+        
         # Create response
         response = TranslationResponse(
             original_text=translation_request.text,
@@ -740,12 +846,32 @@ async def _perform_translation(translation_request: TranslationRequest) -> Trans
         # Cache the result
         await cache_manager.set(cache_key, response.dict(), ttl=3600)
         
-        logger.info(f"Translation completed: {translation_request.from_lang} -> {translation_request.target_lang}")
+        logger.info(f"Translation completed: {translation_request.from_lang} -> {translation_request.target_lang} in {processing_time:.3f}s")
         return response
         
     except Exception as e:
         logger.error(f"Translation failed: {e}")
         raise TranslationError(f"Failed to translate text: {str(e)}")
+
+
+# Additional utility endpoints
+@app.get("/stats", summary="API Statistics")
+async def get_stats():
+    """Get API usage statistics."""
+    return {
+        "version": "2.0.0",
+        "uptime": time.time(),
+        "supported_languages": len(LANGUAGE_CODES),
+        "cache_type": await cache_manager.health_check(),
+        "rate_limits": {
+            "translate": f"{settings.rate_limit_per_minute}/minute",
+            "batch": f"{settings.batch_rate_limit_per_minute}/minute"
+        },
+        "limits": {
+            "max_text_length": settings.max_text_length,
+            "max_batch_size": settings.max_batch_size
+        }
+    }
 
 
 if __name__ == "__main__":
@@ -756,5 +882,6 @@ if __name__ == "__main__":
         host=settings.host,
         port=settings.port,
         reload=settings.debug,
-        log_level="info" if not settings.debug else "debug"
+        log_level=settings.log_level.lower(),
+        access_log=True
     )
