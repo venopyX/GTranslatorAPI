@@ -31,3 +31,4 @@ python-dotenv==1.0.0
 structlog==23.2.0
 
 click
+h11
