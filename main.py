@@ -664,11 +664,27 @@ async def value_error_handler(request: Request, exc: ValueError):
         }
     )
 
-
 # API Routes
 @app.get("/", summary="API Health Check")
-async def root():
+@app.head("/", summary="API Health Check HEAD")
+async def root(request: Request):
     """Root endpoint for health check."""
+    # For HEAD requests, return empty response with headers
+    if request.method == "HEAD":
+        return FastAPIResponse(
+            status_code=200,
+            headers={
+                "Content-Type": "application/json",
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+                "X-Health-Status": "OK",
+                "X-Service": "GTranslatorAPI",
+                "X-Version": "2.0.0",
+            }
+        )
+    
+    # For GET requests, return full JSON response
     return {
         "message": "🚀 GTranslatorAPI v2.0 is running!",
         "version": "2.0.0",
@@ -684,7 +700,8 @@ async def root():
 
 
 @app.get("/health", summary="Detailed Health Check")
-async def health_check():
+@app.head("/health", summary="Detailed Health Check HEAD")
+async def health_check(request: Request):
     """Detailed health check endpoint."""
     try:
         # Test translation service
@@ -696,6 +713,26 @@ async def health_check():
     
     cache_status = await cache_manager.health_check()
     
+    # For HEAD requests, return status in headers only
+    if request.method == "HEAD":
+        status_code = 200 if service_status == "healthy" else 503
+        return FastAPIResponse(
+            status_code=status_code,
+            headers={
+                "Content-Type": "application/json",
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+                "X-Health-Status": service_status.upper(),
+                "X-Service": "GTranslatorAPI",
+                "X-Version": "2.0.0",
+                "X-Cache-Status": cache_status,
+                "X-Timestamp": str(int(time.time())),
+                "X-Supported-Languages": str(len(LANGUAGE_CODES)),
+            }
+        )
+    
+    # For GET requests, return full JSON response
     return {
         "status": service_status,
         "timestamp": time.time(),
@@ -708,6 +745,34 @@ async def health_check():
             "cache": cache_status,
             "rate_limiter": "active"
         }
+    }
+
+
+@app.head("/ping", summary="Simple Ping Check")
+async def ping_check():
+    """Simple ping endpoint for monitoring services."""
+    return FastAPIResponse(
+        status_code=200,
+        headers={
+            "Content-Type": "text/plain",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-Health-Status": "OK",
+            "X-Service": "GTranslatorAPI",
+            "X-Ping": "PONG",
+        }
+    )
+
+
+@app.get("/ping", summary="Simple Ping Check GET")
+async def ping_check_get():
+    """Simple ping endpoint for GET requests."""
+    return {
+        "status": "OK",
+        "message": "PONG",
+        "timestamp": time.time(),
+        "service": "GTranslatorAPI"
     }
 
 
